@@ -1,5 +1,6 @@
-torch==1.11.0
-torchvision>=0.9.1
+# The following torch and torchvision versions are outdated.
+#torch==1.11.0
+#torchvision>=0.9.1
 imageio
 imageio-ffmpeg
 matplotlib
@@ -7,3 +8,8 @@ configargparse
 tensorboard>=2.0
 tqdm
 opencv-python
+
+# The following are new requirements for editing with InstructPix2Pix
+accelerate
+diffusers
+transformers
