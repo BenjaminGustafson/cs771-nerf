@@ -18,10 +18,20 @@ from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
 
+from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
+import cv2
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
+
+# For some reason, this was breaking if I put it in main.
+pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+    "timbrooks/instruct-pix2pix", safety_checker=None, torch_dtype=torch.float16
+).to(device)
+pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+# For some reason, torch xla errors occur if you don't do this. (even though we don't use torch xla. must be related to InstructPix2Pix?)
+os.environ['PJRT_DEVICE'] = "CUDA" if torch.cuda.is_available() else "CPU"
 
 
 def batchify(fn, chunk):
@@ -527,6 +537,42 @@ def config_parser():
                         help='frequency of testset saving')
     parser.add_argument("--i_video",   type=int, default=50000, 
                         help='frequency of render_poses video saving')
+            
+    # Editing options
+    parser.add_argument("--train_edit_nerf", action='store_true', 
+                        help='train a second nerf for editing a scene')
+    parser.add_argument("--preprocess_edits", action='store_true', 
+                        help='preprocess a given number of edited versions per image')
+    parser.add_argument("--N_preprocess_edits", type=int, default=10, 
+                        help='number of edited versions to preprocess per image')
+    # NOTE: If using train_img_h, train_img_w to downscale images after preprocessing edits, set half_res=False for blender dataset / factor=1 for llff dataset
+    parser.add_argument("--img_downscale_factor", type=int, default=-1, 
+                        help='downscales HxW images to H/factor x W/factor (used to downsample images after preprocessing edits)')
+    parser.add_argument("--pretrained_nerf_path", type=str, default=None, 
+                        help='path to checkpoint for pretrained nerf model if combining pretrained loss')
+
+    parser.add_argument("--train_in2n", action='store_true', # NOTE: must have pretrained weights in directory or specify with --ft_path
+                        help='Train InstructNerf2Nerf')
+    parser.add_argument("--N_nerf_steps", type=int, default=10, 
+                        help='number of nerf steps between image editing / replacement for InstructNerf2Nerf')
+    parser.add_argument("--diffusion_img_h", type=int, default=-1, 
+                        help='height of image to input to InstructPix2Pix (if upsampling/downsampling)')
+    parser.add_argument("--diffusion_img_w", type=int, default=-1, 
+                        help='width of image to input to InstructPix2Pix (if upsampling/downsampling)')
+    
+    parser.add_argument("--image_guidance_scale", type=float, default=1.5, 
+                        help='image guidance scale for InstructPix2Pix') 
+    parser.add_argument("--text_guidance_scale", type=float, default=7.5, 
+                        help='text guidance scale for InstructPix2Pix') 
+    parser.add_argument("--num_diffusion_steps", type=int, default=20, 
+                        help='number of inference steps for InstructPix2Pix') 
+    parser.add_argument("--edit_prompt", type=str, default='turn the excavator pink', 
+                        help='text prompt for InstructPix2Pix') 
+    # parser.add_argument("--edit_loss", type=float, default=0.1, 
+    #                     help='percentage of loss to use from edit nerf (remaining from pretrained)') 
+
+    parser.add_argument("--N_iters", type=int, default=200000, 
+                        help='number of total training iterations') 
 
     return parser
 
@@ -612,6 +658,14 @@ def train():
     H, W = int(H), int(W)
     hwf = [H, W, focal]
 
+    # TODO: Maybe move preprocessing edited images into the data loaders to make this cleaner ?
+    # If we are preprocessing edits at a higher resolution, update H, W, focal, hwf to be the final downsampled sizes:
+    if args.img_downscale_factor != -1:
+        H = H // args.img_downscale_factor
+        W = W // args.img_downscale_factor
+        focal = focal / args.img_downscale_factor
+        hwf = [H, W, focal]
+
     if K is None:
         K = np.array([
             [focal, 0, 0.5*W],
@@ -646,6 +700,86 @@ def train():
     }
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
+
+    # TODO: Maybe move this + above H, W, focal, hwf editing into the data loaders ?
+    # NOTE: Instead of downscaling input images before this, upscaling to edit, then downscaling back, do this instead:
+    # Set half_res=False so images won't get scaled down. Then edit all images. Then downsample images / edited images
+    # 
+    # (Otherwise, upscaling can actually result in blurry / weird edits. The preprocessing has the advantage over 
+    # InstructNeRF2NeRF that allows us to do this.)
+    print(images[0].shape)
+    if args.train_edit_nerf and args.preprocess_edits:
+        # List to hold list of edited images (idx i has list of edited versions of image i)
+        edited_images_lists = []
+        # List with indices of edited images
+        i_edited = np.arange(args.N_preprocess_edits)
+
+        # Preprocess edited versions of the training images:
+        for i, train_idx in enumerate(i_train):
+            image = images[train_idx]
+            edited_images = []
+
+            # Downscale the current training image to desired training size and grab the background indices from this downscaled version. 
+            # We still use the original sized image to pass through the diffusion model for high quality edits before also 
+            # downscaling the edited version to desired training size
+            if args.img_downscale_factor != -1:
+                training_image = cv2.resize(image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
+                # images[train_idx] = training_image
+            else:
+                training_image = image
+
+            if args.white_bkgd:
+                bkg_idxs = (training_image == 1.0).all(axis=2)
+
+            # from PIL import Image
+            # img = Image.fromarray((image * 255.0).astype(np.uint8))
+            # img.save("/home/Nicholas/final_project/diffusion/temp3/image_{}.png".format(i))
+
+            # Preprocess N edits
+            print("Generating {} edited versions of training image i={}".format(args.N_preprocess_edits, i))
+            for _ in range(args.N_preprocess_edits):
+                edited_image = pipe(
+                    prompt=args.edit_prompt, 
+                    image=image, 
+                    output_type="np", # np, pil
+                    num_inference_steps=args.num_diffusion_steps, 
+                    image_guidance_scale=args.image_guidance_scale,
+                    guidance_scale=args.text_guidance_scale
+                ).images[0]
+
+                # After editing the high res training image, downscale to the desired training size
+                if args.img_downscale_factor != -1:
+                    edited_image = cv2.resize(edited_image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
+
+                if args.white_bkgd:
+                    edited_image[bkg_idxs, :] = 1.0
+
+                edited_images.append(edited_image)
+                # img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
+                # img.save("/home/Nicholas/final_project/diffusion/temp3/edited_image_{}.png".format(i))
+
+            edited_images_lists.append(edited_images)
+
+        print("Edited images list size: {}".format(len(edited_images_lists)))
+        print("Edited images list i size: {}".format(len(edited_images_lists[0])))
+        print("Edited images list i np size: {}".format(edited_images_lists[0][0].shape))
+
+        # Downsample all images (training, test, validation) to desired size (H, W, focal, hwf are updated above this):
+        if args.img_downscale_factor != -1:
+            downsampled_images = []
+            for image in images:
+                image = cv2.resize(image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
+                downsampled_images.append(image)
+            images = np.array(downsampled_images)
+
+            print("Downsampled images shape: {}".format(images.shape))
+            print("Downsampled hwf: {}".format(hwf))
+
+    if args.train_edit_nerf and args.pretrained_nerf_path:
+        args.ft_path = args.pretrained_nerf_path
+        render_kwargs_train_orig, render_kwargs_test_orig, start_orig, grad_vars_orig, optimizer_orig = create_nerf(args)
+        render_kwargs_train_orig.update(bds_dict)
+        render_kwargs_test_orig.update(bds_dict)
 
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
@@ -698,7 +832,8 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
+    # N_iters = 200000 + 1
+    N_iters = args.N_iters + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -708,6 +843,10 @@ def train():
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
     
     start = start + 1
+    # If training InstructNeRF2NeRF initialize the index of the current image to edit
+    # This will be sequentially updated
+    if args.train_in2n:
+        cur_edit_img_i = 0
     for i in trange(start, N_iters):
         time0 = time.time()
 
@@ -729,6 +868,76 @@ def train():
             # Random from one image
             img_i = np.random.choice(i_train)
             target = images[img_i]
+
+            if args.train_edit_nerf and not args.preprocess_edits:
+                if args.white_bkgd:
+                    bkg_idxs = (target == 1.0).all(axis=2)
+
+                edited_target = pipe(
+                    prompt=args.edit_prompt, 
+                    image=target, 
+                    output_type="np", # np, pil
+                    num_inference_steps=args.num_diffusion_steps, 
+                    image_guidance_scale=args.image_guidance_scale,
+                    guidance_scale=args.text_guidance_scale
+                ).images[0]
+
+                if args.white_bkgd:
+                    edited_target[bkg_idxs, :] = 1.0
+
+                edited_target = torch.Tensor(edited_target).to(device)
+
+            elif args.train_edit_nerf and args.preprocess_edits:
+                edited_img_i = np.random.choice(i_edited)
+                edited_target = edited_images_lists[img_i][edited_img_i]
+                edited_target = torch.Tensor(edited_target).to(device)
+
+            elif args.train_in2n and i % args.N_nerf_steps == 0:
+                # Get image at index cur_edit_img_i:
+                target = images[cur_edit_img_i]
+
+                # Edit this image:
+                if args.white_bkgd:
+                    bkg_idxs = (target == 1.0).all(axis=2)
+
+                # Upscale before diffusion editing (NOTE: use 512x512 as in InstructNeRF2NeRF)
+                if args.diffusion_img_w != -1 and args.diffusion_img_h != -1:
+                    target_h, target_w = target.shape[:2]
+                    target = cv2.resize(target, (args.diffusion_img_w, args.diffusion_img_h))
+
+                # from PIL import Image
+                # img = Image.fromarray((255.0 * target).astype(np.uint8))
+                # img.save("/home/Nicholas/final_project/nerf-pytorch/logs/lego_test_diffusion_in2n/image{}.png".format(cur_edit_img_i))
+
+                target = pipe(
+                    prompt=args.edit_prompt, 
+                    image=target, 
+                    output_type="np", # np, pil
+                    num_inference_steps=args.num_diffusion_steps, 
+                    image_guidance_scale=args.image_guidance_scale,
+                    guidance_scale=args.text_guidance_scale
+                ).images[0]
+
+                # Rescale to original size
+                if args.diffusion_img_w != -1 and args.diffusion_img_h != -1:
+                    target = cv2.resize(target, (target_w, target_h))
+
+                if args.white_bkgd:
+                    target[bkg_idxs, :] = 1.0
+
+                # from PIL import Image
+                # img = Image.fromarray((255.0 * target).astype(np.uint8))
+                # img.save("/home/Nicholas/final_project/nerf-pytorch/logs/lego_test_diffusion_in2n/edited_image{}.png".format(cur_edit_img_i))
+
+                # Replace the original image with the edited image in the dataset
+                images[cur_edit_img_i] = target
+
+                # Set img_i = cur_edit_img_i to get the correct poses after this
+                img_i = cur_edit_img_i
+
+                # Increment cur_edit_img_i to next index:
+                cur_edit_img_i = (cur_edit_img_i + 1) % len(images)
+
             target = torch.Tensor(target).to(device)
             pose = poses[img_i, :3,:4]
 
@@ -755,6 +964,8 @@ def train():
                 rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
                 batch_rays = torch.stack([rays_o, rays_d], 0)
                 target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                if args.train_edit_nerf:
+                    edited_target_s = edited_target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
@@ -762,15 +973,57 @@ def train():
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
-        img_loss = img2mse(rgb, target_s)
-        trans = extras['raw'][...,-1]
-        loss = img_loss
-        psnr = mse2psnr(img_loss)
 
-        if 'rgb0' in extras:
-            img_loss0 = img2mse(extras['rgb0'], target_s)
-            loss = loss + img_loss0
-            psnr0 = mse2psnr(img_loss0)
+        # For training the NeRF without iterative dataset replacement, keep track of the original image "target"
+        # (and "target_s") AND the edited image "edited_target" (and "edited_target_s") in case we want to
+        # add some extra functionality later that relies on both the original and edited images:
+        # (This can also let us just see what the PSNR is between both edited and original images although we only train on edited)
+        if args.train_edit_nerf and not args.pretrained_nerf_path:
+            orig_img_loss = img2mse(rgb, target_s)
+            trans = extras['raw'][...,-1]
+            psnr = mse2psnr(orig_img_loss)
+
+            edited_img_loss = img2mse(rgb, edited_target_s)
+            psnr_edited = mse2psnr(edited_img_loss)
+            loss = edited_img_loss
+            
+            if 'rgb0' in extras:
+                edited_img_loss0 = img2mse(extras['rgb0'], edited_target_s)
+                loss = loss + edited_img_loss0
+                psnr0 = mse2psnr(edited_img_loss0)
+
+        elif args.train_edit_nerf and args.pretrained_nerf_path:
+            with torch.no_grad():
+                rgb_orig, disp_orig, acc_orig, extras_orig = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                                            verbose=i < 10, retraw=True,
+                                                                            **render_kwargs_train_orig)
+            img_loss_orig = img2mse(rgb_orig, target_s)
+            trans = extras['raw'][...,-1]
+            loss = img_loss_orig
+            psnr = mse2psnr(img_loss_orig)
+
+            if 'rgb0' in extras_orig:
+                img_loss0 = img2mse(extras_orig['rgb0'], target_s)
+                loss = loss + img_loss0
+                psnr0 = mse2psnr(img_loss0)
+
+            img_loss_edited = img2mse(rgb, edited_target_s)
+            psnr_edited = mse2psnr(img_loss_edited)
+            loss = loss + img_loss_edited
+            if 'rgb0' in extras:
+                edited_img_loss0 = img2mse(extras['rgb0'], edited_target_s)
+                loss = loss + edited_img_loss0
+            # psnr_combined = mse2psnr(loss)
+        else:
+            img_loss = img2mse(rgb, target_s)
+            trans = extras['raw'][...,-1]
+            loss = img_loss
+            psnr = mse2psnr(img_loss)
+
+            if 'rgb0' in extras:
+                img_loss0 = img2mse(extras['rgb0'], target_s)
+                loss = loss + img_loss0
+                psnr0 = mse2psnr(img_loss0)
 
         loss.backward()
         optimizer.step()
@@ -826,7 +1079,10 @@ def train():
 
     
         if i%args.i_print==0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            if args.train_edit_nerf:
+                tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}  PSNR (Edited Img): {psnr_edited.item()}")
+            else:
+                tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
         """
             print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
             print('iter time {:.05f}'.format(dt))
