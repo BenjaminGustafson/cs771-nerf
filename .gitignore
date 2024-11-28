@@ -6,4 +6,3 @@
 *.npz
 *.dae
 data/*
-logs/*
