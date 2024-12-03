@@ -1,0 +1,1 @@
+python3 run_nerf.py --train_in2n --config configs/ficus_edit.txt --ft_path='./logs/blender_ficus/080000.tar' --i_testset 500 --i_weights 1000 --i_video 1000 --N_iters 90000
