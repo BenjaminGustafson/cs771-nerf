@@ -20,4 +20,4 @@ half_res = False
 
 image_guidance_scale = 1.45
 text_guidance_scale = 10
-edit_prompt = "make it a desert plant"
+edit_prompt = "make the leaves look like fall leaves"
