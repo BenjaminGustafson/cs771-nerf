@@ -732,18 +732,18 @@ def train():
             #     ).images[0]
 
             # After editing the high res training image, downscale to the desired training size
-            if args.img_downscale_factor != -1:
-                edited_image = cv2.resize(edited_image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
+            # if args.img_downscale_factor != -1:
+            #     edited_image = cv2.resize(edited_image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
 
-            if args.white_bkgd:
-                edited_image[bkg_idxs, :] = 1.0
+            # if args.white_bkgd:
+            #     edited_image[bkg_idxs, :] = 1.0
 
-            initial_edit_list.append(edited_image)
+            # initial_edit_list.append(edited_image)
 
             #NOTE: If you want to visualize the edited images, you can do something like this: 
-            img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
-            print("+++++++++++++++++++")
-            img.save("./imgs/edited_image_{}.png".format(i))
+            # img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
+            # print("+++++++++++++++++++")
+            # img.save("./imgs/edited_image_{}.png".format(i))
 
         # Preprocess edited versions of the training images:
         for i, train_idx in enumerate(i_train):
