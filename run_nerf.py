@@ -714,22 +714,22 @@ def train():
         # List with indices of edited images
         i_edited = np.arange(args.N_preprocess_edits)
 
-         # update the dataset inorder to avoid the issue of picking a black background
-         #  (? or the nerf is sampling incorrect pixel at that point?)
+            # update the dataset inorder to avoid the issue of picking a black background
+            #  (? or the nerf is sampling incorrect pixel at that point?)
 
-        initial_edit_list = []
-        #edit the actual image
-        for i,image_edit in enumerate(images):
-            print("Generating {} edited versions of training image i={}".format(args.N_preprocess_edits, i))
-           
-            edited_image = pipe(
-                prompt=args.edit_prompt, 
-                image=image_edit, 
-                output_type="np", # np, pil
-                num_inference_steps=args.num_diffusion_steps, 
-                image_guidance_scale=args.image_guidance_scale,
-                guidance_scale=args.text_guidance_scale
-            ).images[-1]
+            # initial_edit_list = []
+            # #edit the actual image
+            # for i,image_edit in enumerate(images):
+            #     print("Generating {} edited versions of training image i={}".format(args.N_preprocess_edits, i))
+            
+            #     edited_image = pipe(
+            #         prompt=args.edit_prompt, 
+            #         image=image_edit, 
+            #         output_type="np", # np, pil
+            #         num_inference_steps=args.num_diffusion_steps, 
+            #         image_guidance_scale=args.image_guidance_scale,
+            #         guidance_scale=args.text_guidance_scale
+            #     ).images[0]
 
             # After editing the high res training image, downscale to the desired training size
             if args.img_downscale_factor != -1:
@@ -742,10 +742,8 @@ def train():
 
             #NOTE: If you want to visualize the edited images, you can do something like this: 
             img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
+            print("+++++++++++++++++++")
             img.save("./imgs/edited_image_{}.png".format(i))
-
-        return
-
 
         # Preprocess edited versions of the training images:
         for i, train_idx in enumerate(i_train):
@@ -779,7 +777,7 @@ def train():
                     image_guidance_scale=args.image_guidance_scale,
                     guidance_scale=args.text_guidance_scale
                 ).images[0]
-
+                    
                 # After editing the high res training image, downscale to the desired training size
                 if args.img_downscale_factor != -1:
                     edited_image = cv2.resize(edited_image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
@@ -811,7 +809,7 @@ def train():
             # print("Downsampled hwf: {}".format(hwf))
 
     # Move testing data to GPU
-    #render_poses = torch.Tensor(render_poses).to(device)
+    render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
@@ -859,8 +857,6 @@ def train():
     poses = torch.Tensor(poses).to(device)
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
-
-
     # N_iters = 200000 + 1
     N_iters = args.N_iters + 1
     print('Begin')
@@ -892,8 +888,28 @@ def train():
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
-
         else:
+            '''
+            initial_edit_list = []
+            #edit the actual image
+            for i,image_edit in enumerate(images):
+                print("Generating {} edited versions of training image i={}".format(args.N_preprocess_edits, i))
+            
+                edited_image = pipe(
+                    prompt=args.edit_prompt, 
+                    image=image_edit, 
+                    output_type="np", # np, pil
+                    num_inference_steps=args.num_diffusion_steps, 
+                    image_guidance_scale=args.image_guidance_scale,
+                    guidance_scale=args.text_guidance_scale
+                ).images[-1]
+
+                img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
+                print("+++++++++++++++++++")
+                img.save("./imgs/edited_image_{}.png".format(i))
+                initial_edit_list.append(edited_image)
+            '''
+
             # Random from one image
             img_i = np.random.choice(i_train)
             target = images[img_i]
@@ -910,6 +926,9 @@ def train():
                     image_guidance_scale=args.image_guidance_scale,
                     guidance_scale=args.text_guidance_scale
                 ).images[0]
+                print("===")
+                im = Image.fromarray((edited_target * 255.0).astype(np.uint8))
+                im.save("./imgs/edited_image_test.png")
 
                 if args.white_bkgd:
                     edited_target[bkg_idxs, :] = 1.0
@@ -1136,6 +1155,5 @@ def train():
 
 
 if __name__=='__main__':
-    #torch.set_default_tensor_type('torch.cuda.FloatTensor')
-
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
     train()

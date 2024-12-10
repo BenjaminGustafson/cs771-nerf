@@ -1,12 +1,12 @@
 expname = blender_paper_farm
 basedir = ./logs
-datadir = ./data/nerf_synthetic/farm-small
+datadir = ./data/nerf_llff_data/farm-small
 dataset_type = blender
 
 no_batching = True
 
 use_viewdirs = True
-white_bkgd = True
+white_bkgd = False
 lrate_decay = 500
 
 N_samples = 64
