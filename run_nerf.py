@@ -20,7 +20,6 @@ from load_LINEMOD import load_LINEMOD_data
 
 from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
 import cv2
-from PIL import Image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
@@ -719,30 +718,32 @@ def train():
 
         initial_edit_list = []
         #edit the actual image
-        for i,image_edit in enumerate(images):
+        for image_edit in images:
             print("Generating {} edited versions of training image i={}".format(args.N_preprocess_edits, i))
-           
-            edited_image = pipe(
-                prompt=args.edit_prompt, 
-                image=image_edit, 
-                output_type="np", # np, pil
-                num_inference_steps=args.num_diffusion_steps, 
-                image_guidance_scale=args.image_guidance_scale,
-                guidance_scale=args.text_guidance_scale
-            ).images[-1]
+            for _ in range(args.N_preprocess_edits):
+                edited_image = pipe(
+                    prompt=args.edit_prompt, 
+                    image=image_edit, 
+                    output_type="np", # np, pil
+                    num_inference_steps=args.num_diffusion_steps, 
+                    image_guidance_scale=args.image_guidance_scale,
+                    guidance_scale=args.text_guidance_scale
+                ).images[0]
 
-            # After editing the high res training image, downscale to the desired training size
-            if args.img_downscale_factor != -1:
-                edited_image = cv2.resize(edited_image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
+                # After editing the high res training image, downscale to the desired training size
+                if args.img_downscale_factor != -1:
+                    edited_image = cv2.resize(edited_image, (W, H), cv2.INTER_AREA) # use INTER_AREA for downsampling
 
-            if args.white_bkgd:
-                edited_image[bkg_idxs, :] = 1.0
+                if args.white_bkgd:
+                    edited_image[bkg_idxs, :] = 1.0
 
-            initial_edit_list.append(edited_image)
+                edited_images.append(edited_image)
 
-            #NOTE: If you want to visualize the edited images, you can do something like this: 
-            img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
-            img.save("./imgs/edited_image_{}.png".format(i))
+                # NOTE: If you want to visualize the edited images, you can do something like this: 
+                # img = Image.fromarray((edited_image * 255.0).astype(np.uint8))
+                # img.save("/home/Nicholas/final_project/diffusion/temp3/edited_image_{}.png".format(i))
+
+            edited_images_lists.append(edited_images)
 
         return
 
@@ -811,7 +812,7 @@ def train():
             # print("Downsampled hwf: {}".format(hwf))
 
     # Move testing data to GPU
-    #render_poses = torch.Tensor(render_poses).to(device)
+    render_poses = torch.Tensor(render_poses).to(device)
 
     # Short circuit if only rendering out from trained model
     if args.render_only:
@@ -1136,6 +1137,6 @@ def train():
 
 
 if __name__=='__main__':
-    #torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()
