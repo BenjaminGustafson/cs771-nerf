@@ -1,7 +1,8 @@
-expname = blender_edit_ficus_desert_bkg
+expname = ficus_edit__in2n
 basedir = ./logs
 datadir = ./data/nerf_synthetic/ficus
 dataset_type = blender
+ft_path = ./logs/blender_edit_ficus_desert_bkg/080000.tar
 
 no_batching = True
 
@@ -19,6 +20,6 @@ precrop_frac = 0.5
 half_res = False
 
 num_diffusion_steps = 20
-image_guidance_scale = 1.75
+image_guidance_scale = 1.5
 text_guidance_scale = 7.5
 edit_prompt = "place it in a desert"

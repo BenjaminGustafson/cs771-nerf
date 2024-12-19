@@ -285,5 +285,5 @@ def gen_poses(basedir, match_type, factors=None):
     
 
 if __name__ == "__main__":
-    res = load_colmap_data("/home/riyadhassen/cs771-nerf/data/nerf_llff_data/farm-small/colmap")
-    save_poses("/home/riyadhassen/cs771-nerf/data/nerf_llff_data/farm-small/colmap",res[0],res[1],res[2])
+    res = load_colmap_data("/home/riyadhassen/cs771-nerf/data/nerf_llff_data/fangzhou-small/colmap")
+    save_poses("/home/riyadhassen/cs771-nerf/data/nerf_llff_data/fangzhou-small",res[0],res[1],res[2])
